@@ -138,6 +138,27 @@ from .tools.supplier_parts import (
 # API version to gate parameter permission checks
 PARAMETER_PERMISSION_FIX_MIN_API_VERSION = 541
 
+# API version from which ApiToken switched to hmac-digest ("v2") storage
+# (core PR #12850). Below this version, `ApiToken.key` holds the raw,
+# usable plaintext token and `.token` returns a *masked* display string once
+# saved. From this version on, `.key` is only the public identifier and the
+# raw usable token is available via `.token` - but only in-memory, right
+# after `.create()`/`.save()` (the raw secret itself is never persisted).
+API_TOKEN_V2_MIN_API_VERSION = 547
+
+
+def _raw_api_token(token: ApiToken) -> str:
+    """Return the raw, usable token value right after creation.
+
+    Compatible with both pre- and post-#12850 core (see
+    API_TOKEN_V2_MIN_API_VERSION above) - the field that holds a usable
+    bearer credential right after `ApiToken.objects.create(...)` differs
+    between the two.
+    """
+    if INVENTREE_API_VERSION >= API_TOKEN_V2_MIN_API_VERSION:
+        return token.token
+    return token.key
+
 
 @override_settings(PLUGIN_TESTING_SETUP=True)
 class MCPToolPermissionTest(InvenTreeTestCase):
@@ -1988,9 +2009,9 @@ class MCPTransportTest(InvenTreeTestCase):
     def setUpTestData(cls):
         super().setUpTestData()
 
-        cls.api_token = ApiToken.objects.create(
-            user=cls.user, name="transport-test-token"
-        ).key
+        cls.api_token = _raw_api_token(
+            ApiToken.objects.create(user=cls.user, name="transport-test-token")
+        )
 
         app, _ = Application.objects.get_or_create(
             name="mcp-transport-test-app",
@@ -2183,9 +2204,9 @@ class ToolLoggingTest(InvenTreeTestCase):
     def setUpTestData(cls):
         super().setUpTestData()
 
-        cls.api_token = ApiToken.objects.create(
-            user=cls.user, name="tool-logging-test-token"
-        ).key
+        cls.api_token = _raw_api_token(
+            ApiToken.objects.create(user=cls.user, name="tool-logging-test-token")
+        )
 
         registry.reload_plugins(full_reload=True, collect=True)
         registry.set_plugin_state("inventree-mcp", True)
