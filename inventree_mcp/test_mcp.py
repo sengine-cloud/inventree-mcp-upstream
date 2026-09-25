@@ -2321,6 +2321,16 @@ class PluginSettingsTest(InvenTreeTestCase):
             mock_get.return_value.get_setting.return_value = False
             self.assertFalse(get_plugin_setting("MCP_READ_ONLY"))
 
+    def test_env_overrides_the_stored_setting(self):
+        """INVENTREE_MCP_<KEY> pins a setting from deployment config, both ways."""
+        with patch("inventree_mcp.settings._get_plugin_instance") as mock_get:
+            mock_get.return_value.get_setting.return_value = True
+            with patch.dict("os.environ", {"INVENTREE_MCP_MCP_READ_ONLY": "false"}):
+                self.assertFalse(get_plugin_setting("MCP_READ_ONLY"))
+            mock_get.return_value.get_setting.return_value = False
+            with patch.dict("os.environ", {"INVENTREE_MCP_MCP_READ_ONLY": "True"}):
+                self.assertTrue(get_plugin_setting("MCP_READ_ONLY"))
+
 
 class ClampLimitTest(unittest.TestCase):
     """Direct unit tests for the pagination cap every list tool relies on.

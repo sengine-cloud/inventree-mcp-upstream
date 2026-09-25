@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,9 +62,6 @@ class OIDCConfig:
 
 
 def _setting(key: str) -> str:
-    env = os.environ.get(f"INVENTREE_MCP_{key}")
-    if env is not None:
-        return env.strip()
     from .settings import get_plugin_value
 
     return str(get_plugin_value(key, "") or "").strip()

@@ -133,6 +133,10 @@ Under **Settings > Plugin Settings**:
 - **Read Only** (`MCP_READ_ONLY`, default `True`): block all write actions via MCP, regardless of
   the calling user's permissions. A plugin-wide kill switch, independent of per-user roles.
 
+Any setting can be pinned from the environment as `INVENTREE_MCP_<KEY>` (e.g.
+`INVENTREE_MCP_MCP_READ_ONLY=false`), which wins over the stored value. Useful when configuration
+lives in deployment manifests. Booleans accept `1/true/yes/on`.
+
 ## Authentication
 
 Access follows the calling user's normal InvenTree role assignments. Supported auth methods:
@@ -157,8 +161,8 @@ that uid, the link SSO login already created, and the request then runs with tha
 like any other. A subject with no linked account is refused. So is a machine token (`sub == azp`,
 e.g. client credentials), unless it is mapped to a user explicitly.
 
-Configure under **Settings > Plugin Settings**. Each setting can also come from an
-`INVENTREE_MCP_<KEY>` environment variable, which takes precedence:
+Configure under **Settings > Plugin Settings**. As for every setting of this plugin, an
+`INVENTREE_MCP_<KEY>` environment variable takes precedence (see Configuration):
 
 - `OIDC_ISSUER`: the expected `iss`, matched exactly. Empty (the default) turns OIDC off.
 - `OIDC_AUDIENCE`: an `aud` value the token must carry, usually the MCP URL at your gateway.
