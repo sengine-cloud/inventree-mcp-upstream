@@ -40,8 +40,16 @@ Read Only is on they are also left out of `tools/list`.
 | `print_label` | print labels through a label plugin; refuses InvenTree's silent PDF fallback | `POST /api/label/print/` |
 | `scan_barcode` | resolve barcode data through every active barcode plugin | `POST /api/barcode/` |
 | `link_barcode` / `unlink_barcode` | assign or remove a third-party barcode | `POST /api/barcode/link/`, `/unlink/` |
+| `create_part` | create a part, optionally with initial stock | `POST /api/part/` |
+| `delete_parts` | delete parts (InvenTree refuses active ones) | `DELETE /api/part/<id>/` |
+| `adjust_stock` / `count_stock` | add/remove stock, or record a stocktake | `POST /api/stock/add/`, `/remove/`, `/count/` |
+| `transfer_stock` | move all or part of a stock item | `POST /api/stock/transfer/` |
+| `update_stock_item` | change status, batch, serial, expiry, notes, ... | `PATCH /api/stock/<id>/` |
+| `create_/update_/delete_category` | part category CRUD | `/api/part/category/` |
+| `create_/update_/delete_location` | stock location CRUD | `/api/stock/location/` |
 
-Read tools added alongside: `list_label_templates` and `list_machines` (label printers and their
+Read tools added alongside: `get_category_tree`, `get_location_tree`, `stock_by_category_and_location`
+and `stock_pivot` (aggregations built from the list views), `list_label_templates` and `list_machines` (label printers and their
 driver status; machine configs sit in InvenTree's admin ruleset).
 
 ## Setup

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 from ..mcp_server import mcp
 from ..proxy import call_view
 from ..view_resolution import resolve_view
@@ -146,3 +148,121 @@ async def create_stock_item(
         resolve_view("stock.api", "StockList"), "POST", "/api/stock/", data=data
     )
     return {"items": result if isinstance(result, list) else [result]}
+
+
+async def _adjust(view_name: str, path: str, data: dict[str, Any]) -> dict:
+    await call_view(resolve_view("stock.api", view_name), "POST", path, data=data)
+    return {"ok": True}
+
+
+@mcp.tool()
+async def adjust_stock(stock_item_id: int, quantity: float, notes: str = "") -> dict:
+    """Add stock to, or take stock from, a stock item.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the stock change permission. Recorded in the item's history under the
+    calling user.
+
+    Args:
+        stock_item_id: the StockItem ID.
+        quantity: amount to add (positive) or remove (negative).
+        notes: note for the history entry.
+    """
+    if quantity == 0:
+        raise ToolError("quantity must not be zero")
+    view, path = ("StockAdd", "/api/stock/add/") if quantity > 0 else ("StockRemove", "/api/stock/remove/")
+    await _adjust(view, path, {"items": [{"pk": stock_item_id, "quantity": abs(quantity)}], "notes": notes})
+    return await get_stock_item(stock_item_id)
+
+
+@mcp.tool()
+async def count_stock(stock_item_id: int, quantity: float, notes: str = "") -> dict:
+    """Record a stocktake: set a stock item's counted, absolute quantity.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the stock change permission.
+
+    Args:
+        stock_item_id: the StockItem ID.
+        quantity: the counted quantity.
+        notes: note for the history entry.
+    """
+    await _adjust(
+        "StockCount", "/api/stock/count/", {"items": [{"pk": stock_item_id, "quantity": quantity}], "notes": notes}
+    )
+    return await get_stock_item(stock_item_id)
+
+
+@mcp.tool()
+async def transfer_stock(
+    stock_item_id: int, location: int, quantity: float | None = None, notes: str = ""
+) -> dict:
+    """Move a stock item (or part of it) to another location.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the stock change permission. Moving part of an item splits it.
+
+    Args:
+        stock_item_id: the StockItem ID.
+        location: destination StockLocation ID.
+        quantity: how much to move; omit to move the whole item.
+        notes: note for the history entry.
+    """
+    if quantity is None:
+        quantity = float((await get_stock_item(stock_item_id))["quantity"])
+    await _adjust(
+        "StockTransfer",
+        "/api/stock/transfer/",
+        {"items": [{"pk": stock_item_id, "quantity": quantity}], "location": location, "notes": notes},
+    )
+    return await get_stock_item(stock_item_id)
+
+
+@mcp.tool()
+async def update_stock_item(
+    stock_item_id: int,
+    status: int | None = None,
+    batch: str | None = None,
+    serial: str | None = None,
+    expiry_date: str | None = None,
+    packaging: str | None = None,
+    notes: str | None = None,
+    link: str | None = None,
+    purchase_price: float | None = None,
+) -> dict:
+    """Change fields of a stock item. Only the fields you pass change.
+
+    Quantity and location change through adjust_stock, count_stock and
+    transfer_stock, so they're recorded as stock movements.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the stock change permission.
+
+    Args:
+        stock_item_id: the StockItem ID.
+        status: stock status code (e.g. 10 OK, 50 attention, 55 damaged,
+            60 destroyed, 65 rejected, 70 lost); see describe_filters("stock").
+        batch: batch code.
+        serial: serial number.
+        expiry_date: expiry date, YYYY-MM-DD.
+        packaging: packaging description.
+        notes: notes (markdown).
+        link: external link (URL).
+        purchase_price: unit purchase price.
+    """
+    fields = {
+        "status": status,
+        "batch": batch,
+        "serial": serial,
+        "expiry_date": expiry_date,
+        "packaging": packaging,
+        "notes": notes,
+        "link": link,
+        "purchase_price": purchase_price,
+    }
+    data = {k: v for k, v in fields.items() if v is not None}
+    if not data:
+        raise ToolError("Pass at least one field to change")
+    return await call_view(
+        resolve_view("stock.api", "StockDetail"), "PATCH", f"/api/stock/{stock_item_id}/", pk=stock_item_id, data=data
+    )

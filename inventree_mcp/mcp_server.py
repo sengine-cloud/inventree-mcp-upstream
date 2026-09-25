@@ -67,6 +67,7 @@ from .tools import (  # noqa: F401
     sales_orders,
     stock,
     stock_history,
+    stock_reports,
     supplier_parts,
 )
 

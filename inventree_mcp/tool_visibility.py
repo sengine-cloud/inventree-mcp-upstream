@@ -134,6 +134,22 @@ _TOOL_VIEWS: dict[str, tuple[str, str, str]] = {
     "scan_barcode": ("plugin.base.barcodes.api", "BarcodeScan", "POST"),
     "link_barcode": ("plugin.base.barcodes.api", "BarcodeAssign", "POST"),
     "unlink_barcode": ("plugin.base.barcodes.api", "BarcodeUnassign", "POST"),
+    "create_part": ("part.api", "PartList", "POST"),
+    "delete_parts": ("part.api", "PartDetail", "DELETE"),
+    "adjust_stock": ("stock.api", "StockAdd", "POST"),
+    "count_stock": ("stock.api", "StockCount", "POST"),
+    "transfer_stock": ("stock.api", "StockTransfer", "POST"),
+    "update_stock_item": ("stock.api", "StockDetail", "PATCH"),
+    "get_category_tree": ("part.api", "CategoryTree", "GET"),
+    "create_category": ("part.api", "CategoryList", "POST"),
+    "update_category": ("part.api", "CategoryDetail", "PATCH"),
+    "delete_category": ("part.api", "CategoryDetail", "DELETE"),
+    "get_location_tree": ("stock.api", "StockLocationTree", "GET"),
+    "create_location": ("stock.api", "StockLocationList", "POST"),
+    "update_location": ("stock.api", "StockLocationDetail", "PATCH"),
+    "delete_location": ("stock.api", "StockLocationDetail", "DELETE"),
+    "stock_by_category_and_location": ("stock.api", "StockList", "GET"),
+    "stock_pivot": ("stock.api", "StockList", "GET"),
 }
 
 

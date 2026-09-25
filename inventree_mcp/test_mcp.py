@@ -2865,3 +2865,175 @@ class WriteToolsTest(InvenTreeTestCase):
         self._as(self.viewer)
         with self.assertRaises(ToolError):
             await link_barcode(barcode="EXT-WT-2", model="part", object_id=self.part.pk)
+
+
+class ParityToolsTest(InvenTreeTestCase):
+    """Tools carried over from the community plugin, now through the real views."""
+
+    roles: ClassVar[list[str]] = [
+        "part.view",
+        "part.add",
+        "part.change",
+        "part.delete",
+        "part_category.view",
+        "part_category.add",
+        "part_category.change",
+        "part_category.delete",
+        "stock.view",
+        "stock.add",
+        "stock.change",
+        "stock_location.view",
+        "stock_location.add",
+        "stock_location.change",
+        "stock_location.delete",
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.viewer = get_user_model().objects.create_user(
+            username="parity-viewer", password="password", email="parity-viewer@example.org"
+        )
+        cls.root = PartCategory.objects.create(name="Root")
+        cls.child = PartCategory.objects.create(name="Child", parent=cls.root)
+        cls.grandchild = PartCategory.objects.create(name="Grandchild", parent=cls.child)
+        cls.other = PartCategory.objects.create(name="Other")
+        cls.building = StockLocation.objects.create(name="Building")
+        cls.room = StockLocation.objects.create(name="Room", parent=cls.building)
+        cls.elsewhere = StockLocation.objects.create(name="Elsewhere")
+        cls.p_root = Part.objects.create(name="P root", description="", category=cls.root, component=True)
+        cls.p_child = Part.objects.create(name="P child", description="", category=cls.child, component=True)
+        cls.p_grand = Part.objects.create(name="P grand", description="", category=cls.grandchild, component=True)
+        cls.p_other = Part.objects.create(name="P other", description="", category=cls.other, component=True)
+        cls.item = StockItem.objects.create(part=cls.p_root, location=cls.room, quantity=10)
+        StockItem.objects.create(part=cls.p_child, location=cls.room, quantity=4)
+        StockItem.objects.create(part=cls.p_grand, location=cls.building, quantity=2)
+        StockItem.objects.create(part=cls.p_other, location=cls.elsewhere, quantity=7)
+        registry.reload_plugins(full_reload=True, collect=True)
+        registry.set_plugin_state("inventree-mcp", True)
+
+    def _as(self, user):
+        context.set_current_user(user)
+        self.addCleanup(context.set_current_user, None)
+
+    async def _writable(self):
+        def _set(value):
+            registry.get_plugin("inventree-mcp").set_setting("MCP_READ_ONLY", value)
+
+        await sync_to_async(_set)(False)
+        self.addCleanup(_set, True)
+
+    async def _call(self, name: str, args: dict) -> Any:
+        result = await mcp.call_tool(name, args)
+        self.assertFalse(getattr(result, "is_error", False), result)
+        return result.structured_content
+
+    async def test_adjust_count_and_update_stock(self):
+        await self._writable()
+        self._as(self.user)
+        added = await self._call("adjust_stock", {"stock_item_id": self.item.pk, "quantity": 3, "notes": "in"})
+        removed = await self._call("adjust_stock", {"stock_item_id": self.item.pk, "quantity": -5})
+        counted = await self._call("count_stock", {"stock_item_id": self.item.pk, "quantity": 20})
+        self.assertEqual(float(added["quantity"]), 13)
+        self.assertEqual(float(removed["quantity"]), 8)
+        self.assertEqual(float(counted["quantity"]), 20)
+        updated = await self._call("update_stock_item", {"stock_item_id": self.item.pk, "status": 55, "batch": "B9"})
+        self.assertEqual(updated["status"], 55)
+        self.assertEqual(updated["batch"], "B9")
+
+        # The stock history row for the edit names the caller. (InvenTree 1.5
+        # queues the add/remove/count rows until the transaction commits, which
+        # an async TestCase's tool thread never does, so only the edit's
+        # immediately-written row is visible here. All of them take the user
+        # from the same request.)
+        def _users():
+            rows = StockItemTracking.objects.filter(item=self.item, user__isnull=False)
+            return set(rows.values_list("user__username", flat=True))
+
+        self.assertEqual(await sync_to_async(_users)(), {self.user.username})
+
+    async def test_adjust_stock_needs_the_role_and_a_nonzero_quantity(self):
+        await self._writable()
+        self._as(self.user)
+        with self.assertRaises(ToolError):
+            await mcp.call_tool("adjust_stock", {"stock_item_id": self.item.pk, "quantity": 0})
+        self._as(self.viewer)
+        with self.assertRaises(ToolError):
+            await mcp.call_tool("adjust_stock", {"stock_item_id": self.item.pk, "quantity": 1})
+
+    async def test_transfer_whole_and_partial(self):
+        await self._writable()
+        self._as(self.user)
+        moved = await self._call("transfer_stock", {"stock_item_id": self.item.pk, "location": self.elsewhere.pk})
+        self.assertEqual(moved["location"], self.elsewhere.pk)
+        await self._call(
+            "transfer_stock", {"stock_item_id": self.item.pk, "location": self.room.pk, "quantity": 4}
+        )
+
+        def _split():
+            return list(StockItem.objects.filter(part=self.p_root).values_list("location", "quantity"))
+
+        split = sorted((loc, float(q)) for loc, q in await sync_to_async(_split)())
+        self.assertEqual(split, sorted([(self.elsewhere.pk, 6.0), (self.room.pk, 4.0)]))
+
+    async def test_create_part_with_initial_stock_then_delete(self):
+        await self._writable()
+        self._as(self.user)
+        part = await self._call(
+            "create_part",
+            {
+                "name": "Fresh",
+                "category": self.other.pk,
+                "description": "d",
+                "IPN": "F-1",
+                "keywords": "fresh new",
+                "tags": ["alpha"],
+                "initial_stock_quantity": 3,
+                "initial_stock_location": self.room.pk,
+            },
+        )
+        self.assertEqual(part["IPN"], "F-1")
+        stock = await self._call("list_stock_items", {"part": part["pk"]})
+        self.assertEqual([float(i["quantity"]) for i in stock["results"]], [3.0])
+
+        refused = await self._call("delete_parts", {"part_ids": [part["pk"]]})
+        self.assertEqual(refused["deleted"], [])  # active parts can't be deleted
+        await self._call("update_part", {"part_id": part["pk"], "active": False})
+        done = await self._call("delete_parts", {"part_ids": [part["pk"]]})
+        self.assertEqual(done["deleted"], [part["pk"]])
+
+    async def test_category_and_location_crud_and_trees(self):
+        await self._writable()
+        self._as(self.user)
+        cat = await self._call("create_category", {"name": "New", "parent": self.root.pk})
+        self.assertEqual(cat["parent"], self.root.pk)
+        cat = await self._call("update_category", {"category_id": cat["pk"], "move_to_top": True, "name": "Top"})
+        self.assertIsNone(cat["parent"])
+        tree = await self._call("get_category_tree", {})
+        self.assertIn("Top", {c["name"] for c in tree["results"]})
+        await self._call("delete_category", {"category_id": cat["pk"]})
+
+        loc = await self._call("create_location", {"name": "Bin", "parent": self.room.pk, "structural": False})
+        self.assertEqual(loc["parent"], self.room.pk)
+        tree = await self._call("get_location_tree", {})
+        self.assertIn("Bin", {loc_["name"] for loc_ in tree["results"]})
+        await self._call("delete_location", {"location_id": loc["pk"]})
+
+        self._as(self.viewer)
+        with self.assertRaises(ToolError):
+            await mcp.call_tool("create_category", {"name": "Nope"})
+
+    async def test_stock_pivots(self):
+        self._as(self.user)
+        rows = (await self._call("stock_by_category_and_location", {}))["rows"]
+        got = {(r["category_id"], r["location_id"]): r["total_quantity"] for r in rows}
+        self.assertEqual(got[(self.root.pk, self.room.pk)], 10)
+        self.assertEqual(got[(self.other.pk, self.elsewhere.pk)], 7)
+
+        scoped = (await self._call("stock_pivot", {"category_id": self.root.pk}))["rows"]
+        self.assertEqual({r["category_id"] for r in scoped}, {self.root.pk, self.child.pk, self.grandchild.pk})
+        shallow = (await self._call("stock_pivot", {"category_id": self.root.pk, "max_depth": 1}))["rows"]
+        self.assertEqual({r["category_id"] for r in shallow}, {self.root.pk, self.child.pk})
+        in_building = (await self._call("stock_pivot", {"location_id": self.building.pk}))["rows"]
+        self.assertEqual({r["location_id"] for r in in_building}, {self.room.pk, self.building.pk})
+        self.assertTrue(all(r["category_path"] for r in scoped))
