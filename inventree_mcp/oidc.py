@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +50,8 @@ ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384", "EdDSA"]
 LEEWAY_SECONDS = 30
 
 _jwk_clients: dict[str, Any] = {}
+_discovery_failures: dict[str, float] = {}
+DISCOVERY_RETRY_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -115,13 +118,35 @@ def _jwks_url(config: OIDCConfig) -> str:
 
 
 def _jwk_client(config: OIDCConfig) -> Any:
-    key = config.jwks_url or config.issuer
-    if key not in _jwk_clients:
-        from jwt import PyJWKClient
+    """Return the cached JWKS client for this issuer, building it on first use.
 
-        _jwk_clients[key] = PyJWKClient(
-            _jwks_url(config), cache_keys=True, lifespan=300, timeout=5
-        )
+    Building it may fetch the discovery document. Any failure there (issuer
+    unreachable, timeout, a malformed document) becomes a clean 401, not an
+    unhandled exception, and is remembered for DISCOVERY_RETRY_SECONDS so an
+    IdP outage doesn't cost every request another blocking fetch.
+    """
+    key = config.jwks_url or config.issuer
+    if key in _jwk_clients:
+        return _jwk_clients[key]
+
+    failed_at = _discovery_failures.get(key)
+    if failed_at is not None and time.monotonic() - failed_at < DISCOVERY_RETRY_SECONDS:
+        raise exceptions.AuthenticationFailed("OIDC provider unavailable")
+
+    from jwt import PyJWKClient
+
+    try:
+        jwks_url = _jwks_url(config)
+    except exceptions.AuthenticationFailed:
+        _discovery_failures[key] = time.monotonic()
+        raise
+    except Exception as exc:
+        _discovery_failures[key] = time.monotonic()
+        logger.warning("MCP OIDC discovery for %s failed: %s", config.issuer, exc)
+        raise exceptions.AuthenticationFailed("OIDC provider unavailable") from exc
+
+    _discovery_failures.pop(key, None)
+    _jwk_clients[key] = PyJWKClient(jwks_url, cache_keys=True, lifespan=300, timeout=5)
     return _jwk_clients[key]
 
 
@@ -149,6 +174,12 @@ class OIDCAuthentication(BaseAuthentication):
         claims = self.verify(token, config)
         user = self.user_for_claims(claims, config)
         if user is None:
+            sub = str(claims.get("sub", ""))
+            if sub and sub == claims.get("azp") and sub in config.client_users:
+                raise exceptions.AuthenticationFailed(
+                    "The user this client is mapped to in OIDC_CLIENT_USERS "
+                    "does not exist or is inactive"
+                )
             raise exceptions.AuthenticationFailed(
                 "No InvenTree user is linked to this token's subject"
             )
@@ -199,7 +230,8 @@ class OIDCAuthentication(BaseAuthentication):
         from allauth.socialaccount.models import SocialAccount
 
         account = (
-            SocialAccount.objects.select_related("user")
+            SocialAccount.objects
+            .select_related("user")
             .filter(provider=config.provider, uid=sub)
             .first()
         )

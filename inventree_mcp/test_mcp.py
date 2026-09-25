@@ -2675,3 +2675,84 @@ class OIDCAuthenticationTest(InvenTreeTestCase):
             scope="g:read",
         ).token
         self.assertEqual(self._post(token).status_code, 200)
+
+
+class OIDCDiscoveryTest(InvenTreeTestCase):
+    """3. A discovery failure is a clean 401, remembered briefly, never a 500."""
+
+    URL = "/plugin/inventree-mcp/mcp/"
+    ENV: ClassVar[dict[str, str]] = {
+        "INVENTREE_MCP_OIDC_ISSUER": "https://unreachable.example/auth/v1/",
+        "INVENTREE_MCP_OIDC_AUDIENCE": "https://gateway.example/mcp",
+        "INVENTREE_MCP_OIDC_PROVIDER": "testidp",
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        registry.reload_plugins(full_reload=True, collect=True)
+        registry.set_plugin_state("inventree-mcp", True)
+
+    def setUp(self):
+        super().setUp()
+        from inventree_mcp import oidc
+
+        oidc._jwk_clients.clear()
+        oidc._discovery_failures.clear()
+        self.addCleanup(oidc._jwk_clients.clear)
+        self.addCleanup(oidc._discovery_failures.clear)
+
+    def _post(self, token: str) -> Any:
+        return Client(enforce_csrf_checks=True).post(
+            self.URL,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json, text/event-stream",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+
+    def test_unreachable_issuer_is_a_401_and_is_not_refetched(self):
+        import urllib.error
+
+        token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"  # JWT-shaped
+        with (
+            patch.dict("os.environ", self.ENV),
+            patch(
+                "urllib.request.urlopen", side_effect=urllib.error.URLError("down")
+            ) as urlopen,
+        ):
+            first = self._post(token)
+            second = self._post(token)
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 401)
+        self.assertIn("error", json.loads(first.content))
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_malformed_discovery_document_is_a_401(self):
+        from io import BytesIO
+
+        token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"
+        with (
+            patch.dict("os.environ", self.ENV),
+            patch("urllib.request.urlopen", return_value=BytesIO(b"<html>not json")),
+        ):
+            self.assertEqual(self._post(token).status_code, 401)
+
+    def test_missing_mapped_machine_user_gets_its_own_message(self):
+        from inventree_mcp.oidc import OIDCAuthentication, OIDCConfig
+
+        config = OIDCConfig(
+            "https://i/", "aud", "testidp", client_users={"bot": "nobody-here"}
+        )
+        auth = OIDCAuthentication()
+        with (
+            patch.object(auth, "verify", return_value={"sub": "bot", "azp": "bot"}),
+            patch("inventree_mcp.oidc.get_config", return_value=config),
+        ):
+            from rest_framework import exceptions
+            from rest_framework.test import APIRequestFactory
+
+            request = APIRequestFactory().post("/", HTTP_AUTHORIZATION="Bearer a.b.c")
+            with self.assertRaises(exceptions.AuthenticationFailed) as cm:
+                auth.authenticate(request)
+        self.assertIn("OIDC_CLIENT_USERS", str(cm.exception.detail))
