@@ -35,6 +35,7 @@ from typing import Any
 from build.serializers import BuildItemSerializer, BuildLineSerializer, BuildSerializer
 from common.serializers import (
     AttachmentSerializer,
+    DataOutputSerializer,
     ParameterSerializer,
     ParameterTemplateSerializer,
     ProjectCodeSerializer,
@@ -46,6 +47,7 @@ from company.serializers import (
     ManufacturerPartSerializer,
     SupplierPartSerializer,
 )
+from machine.serializers import MachineConfigSerializer
 from order.serializers import (
     PurchaseOrderLineItemSerializer,
     PurchaseOrderSerializer,
@@ -62,6 +64,7 @@ from part.serializers import (
     PartSerializer,
 )
 from pydantic import RootModel
+from report.serializers import LabelTemplateSerializer
 from stock.serializers import (
     LocationSerializer,
     StockItemSerializer,
@@ -74,9 +77,25 @@ from .schema_introspection import paginated_schema, serializer_schema
 
 _PERMISSIVE_OUTPUT_MODEL = RootModel[dict[str, Any]]
 
+# Barcode endpoints answer with a plugin-dependent object (the match, or a
+# success message), not a model serializer, so they only promise an object.
+_ANY_OBJECT: dict[str, Any] = {"type": "object"}
+
 _OUTPUT_SCHEMAS = {
     "list_parts": paginated_schema(PartSerializer),
     "get_part": serializer_schema(PartSerializer),
+    "update_part": serializer_schema(PartSerializer),
+    "create_stock_item": {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": serializer_schema(StockItemSerializer)}},
+        "required": ["items"],
+    },
+    "list_label_templates": paginated_schema(LabelTemplateSerializer),
+    "list_machines": paginated_schema(MachineConfigSerializer),
+    "print_label": serializer_schema(DataOutputSerializer),
+    "scan_barcode": _ANY_OBJECT,
+    "link_barcode": _ANY_OBJECT,
+    "unlink_barcode": _ANY_OBJECT,
     "list_categories": paginated_schema(CategorySerializer),
     "get_category": serializer_schema(CategorySerializer),
     "list_stock_items": paginated_schema(StockItemSerializer),

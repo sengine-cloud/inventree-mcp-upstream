@@ -24,6 +24,10 @@ duplicate the check per-tool or bypass `call_view()`.
   `MCP_READ_ONLY`).
 - `mcp_server.py` - the `MCPServer` instance; imports `tools/*` for their `@mcp.tool()` side effect.
 - `mcp_transport.py` - Django view bridging Streamable HTTP onto the MCP server.
+- `tools/labels.py`, `tools/barcodes.py` - label templates, machines, printing, barcode scan/link
+  (sengine fork; writes). Tools that don't wrap a `describe_filters` resource are listed in
+  `tool_visibility._TOOL_VIEWS` with their view and HTTP method, so writes are hidden while
+  read-only and gated by the method's role.
 - `oidc.py` - `OIDCAuthentication`: bearer JWTs from an external OpenID provider, mapped to users
   through their allauth SSO link (off unless `OIDC_ISSUER` is set).
 - `oauth2_bridge.py` - lets `call_view()` present an OAuth2-authenticated request's real token to

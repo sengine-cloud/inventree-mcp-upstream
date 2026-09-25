@@ -97,3 +97,52 @@ async def get_stock_item(
         pk=stock_item_id,
         query_params=filters,
     )
+
+
+@mcp.tool()
+async def create_stock_item(
+    part: int,
+    quantity: float = 1,
+    location: int | None = None,
+    serial_numbers: str | None = None,
+    batch: str | None = None,
+    status: int | None = None,
+    notes: str | None = None,
+    purchase_price: float | None = None,
+) -> dict:
+    """Create stock for a part: one item, or one item per serial number.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the stock add permission.
+
+    Args:
+        part: the Part ID to create stock for.
+        quantity: quantity. With serial numbers it must equal their count.
+        location: StockLocation ID, or omit for no location.
+        serial_numbers: serials for a trackable part, e.g. "1001",
+            "1001,1002" or "1001-1005". Each becomes its own stock item.
+            (InvenTree's create API takes serials only through this field;
+            a plain `serial` is ignored on create.)
+        batch: batch code.
+        status: stock status code (10 = OK); see describe_filters("stock").
+        notes: notes for the new stock.
+        purchase_price: unit purchase price.
+
+    Returns:
+        {"items": [...]}, the created stock items, each shaped like
+        get_stock_item.
+    """
+    fields = {
+        "location": location,
+        "serial_numbers": serial_numbers,
+        "batch": batch,
+        "status": status,
+        "notes": notes,
+        "purchase_price": purchase_price,
+    }
+    data: dict[str, Any] = {"part": part, "quantity": quantity}
+    data.update({k: v for k, v in fields.items() if v is not None})
+    result = await call_view(
+        resolve_view("stock.api", "StockList"), "POST", "/api/stock/", data=data
+    )
+    return {"items": result if isinstance(result, list) else [result]}

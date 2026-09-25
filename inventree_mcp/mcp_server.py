@@ -51,11 +51,13 @@ mcp = MCPServer(
 from . import output_schemas, tool_logging, tool_visibility
 from .tools import (  # noqa: F401
     attachments,
+    barcodes,
     bom,
     build_orders,
     categories,
     companies,
     discovery,
+    labels,
     locations,
     parameters,
     parts,

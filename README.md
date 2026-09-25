@@ -27,6 +27,23 @@ serializers and views (not hand-maintained), so they can't drift as InvenTree ev
 client sees is also filtered to what the calling user can actually use - though every call is still
 permission-checked in full regardless of what was advertised.
 
+## Write tools (sengine fork)
+
+This fork adds write tools, all through `call_view()` like everything else, so they need the
+calling user's role for that write and are refused while **Read Only** is on (the default). While
+Read Only is on they are also left out of `tools/list`.
+
+| Tool | Does | InvenTree endpoint |
+|------|------|--------------------|
+| `update_part` | change a part's fields (name, description, IPN, keywords, units, active, ...) | `PATCH /api/part/<id>/` |
+| `create_stock_item` | create stock, one item per serial number for trackable parts | `POST /api/stock/` |
+| `print_label` | print labels through a label plugin; refuses InvenTree's silent PDF fallback | `POST /api/label/print/` |
+| `scan_barcode` | resolve barcode data through every active barcode plugin | `POST /api/barcode/` |
+| `link_barcode` / `unlink_barcode` | assign or remove a third-party barcode | `POST /api/barcode/link/`, `/unlink/` |
+
+Read tools added alongside: `list_label_templates` and `list_machines` (label printers and their
+driver status; machine configs sit in InvenTree's admin ruleset).
+
 ## Setup
 
 ### 1. Install the plugin

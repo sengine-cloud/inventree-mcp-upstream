@@ -50,6 +50,7 @@ from part.api import PartList
 from part.models import BomItem, BomItemSubstitute, Part, PartCategory, PartTestTemplate
 from part.serializers import PartBriefSerializer, PartSerializer
 from plugin import registry
+from report.models import LabelTemplate
 from stock.models import (
     StockItem,
     StockItemTestResult,
@@ -68,6 +69,7 @@ from .settings import get_plugin_setting
 from .tools import discovery
 from .tools._common import DEFAULT_LIMIT, MAX_LIMIT, build_query_params, clamp_limit
 from .tools.attachments import get_attachment, list_attachments
+from .tools.barcodes import link_barcode
 from .tools.bom import (
     get_bom_item,
     get_bom_substitute,
@@ -92,6 +94,7 @@ from .tools.companies import (
     list_contacts,
 )
 from .tools.discovery import RESOURCE_LOADERS, describe_filters, make_web_link
+from .tools.labels import list_machines, print_label
 from .tools.locations import get_location, list_locations
 from .tools.parameters import (
     get_parameter,
@@ -99,7 +102,7 @@ from .tools.parameters import (
     list_parameter_templates,
     list_parameters,
 )
-from .tools.parts import get_part, list_parts
+from .tools.parts import get_part, list_parts, update_part
 from .tools.project_codes import get_project_code, list_project_codes
 from .tools.purchase_orders import (
     get_purchase_order,
@@ -121,7 +124,7 @@ from .tools.sales_orders import (
     list_sales_order_lines,
     list_sales_orders,
 )
-from .tools.stock import get_stock_item, list_stock_items
+from .tools.stock import create_stock_item, get_stock_item, list_stock_items
 from .tools.stock_history import (
     get_stock_test_result,
     get_stock_tracking,
@@ -145,6 +148,7 @@ PARAMETER_PERMISSION_FIX_MIN_API_VERSION = 541
 # raw usable token is available via `.token` - but only in-memory, right
 # after `.create()`/`.save()` (the raw secret itself is never persisted).
 API_TOKEN_V2_MIN_API_VERSION = 547
+
 
 
 def _raw_api_token(token: ApiToken) -> str:
@@ -1243,6 +1247,9 @@ class ToolVisibilityTest(InvenTreeTestCase):
                 "get_parameter_template",
                 "list_project_codes",
                 "get_project_code",
+                # Label templates are readable by any authenticated user in
+                # InvenTree itself (report.api TemplatePermissionMixin).
+                "list_label_templates",
             },
         )
 
@@ -1348,6 +1355,7 @@ class ToolVisibilityTest(InvenTreeTestCase):
         unmapped = (
             all_names
             - set(tool_visibility._TOOL_RESOURCES)
+            - set(tool_visibility._TOOL_VIEWS)
             # Both pure metadata/utility tools with no underlying gated view:
             # describe_filters only reads static filterset/serializer
             # definitions, make_web_link only builds a URL string - neither
@@ -2675,3 +2683,185 @@ class OIDCAuthenticationTest(InvenTreeTestCase):
             scope="g:read",
         ).token
         self.assertEqual(self._post(token).status_code, 200)
+
+
+class WriteToolsTest(InvenTreeTestCase):
+    """The write tools (and the read tools that support them), through the real views."""
+
+    roles: ClassVar[list[str]] = [
+        "part.view",
+        "part.change",
+        "part_category.view",
+        "stock.view",
+        "stock.add",
+        "stock.change",
+        "stock_location.view",
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.viewer = get_user_model().objects.create_user(
+            username="viewer", password="password", email="viewer@example.org"
+        )
+        cls.category = PartCategory.objects.create(name="Write tools")
+        cls.part = Part.objects.create(
+            name="Scratch", description="before", category=cls.category, component=True
+        )
+        cls.tracked = Part.objects.create(
+            name="Tracked", description="serialised", category=cls.category, trackable=True
+        )
+        cls.location = StockLocation.objects.create(name="Shelf W")
+        cls.item = StockItem.objects.create(part=cls.part, location=cls.location, quantity=5)
+        # The test database starts without InvenTree's default label templates.
+        from django.apps import apps
+
+        apps.get_app_config("report").create_default_labels()
+        registry.reload_plugins(full_reload=True, collect=True)
+        registry.set_plugin_state("inventree-mcp", True)
+
+    def _as(self, user):
+        context.set_current_user(user)
+        self.addCleanup(context.set_current_user, None)
+
+    async def _writable(self):
+        def _set(value):
+            registry.get_plugin("inventree-mcp").set_setting("MCP_READ_ONLY", value)
+
+        await sync_to_async(_set)(False)
+        self.addCleanup(_set, True)
+
+    async def _call(self, name: str, args: dict) -> Any:
+        result = await mcp.call_tool(name, args)
+        self.assertFalse(getattr(result, "is_error", False), result)
+        return result.structured_content
+
+    # --- read-only gate --------------------------------------------------
+
+    async def test_writes_blocked_and_hidden_while_read_only(self):
+        self._as(self.user)
+        with self.assertRaises(ToolError) as cm:
+            await update_part(part_id=self.part.pk, description="x")
+        self.assertIn("read-only", str(cm.exception).lower())
+
+        names = await tool_visibility.visible_tool_names(t.name for t in await mcp.list_tools())
+        self.assertIn("list_label_templates", names)
+        self.assertTrue({"update_part", "create_stock_item", "print_label", "link_barcode"}.isdisjoint(names))
+
+    async def test_writes_listed_once_writable_and_permitted(self):
+        await self._writable()
+        self._as(self.user)
+        names = await tool_visibility.visible_tool_names(t.name for t in await mcp.list_tools())
+        self.assertTrue({"update_part", "create_stock_item"} <= names)
+
+        self._as(self.viewer)
+        names = await tool_visibility.visible_tool_names(t.name for t in await mcp.list_tools())
+        self.assertNotIn("update_part", names)
+        self.assertNotIn("create_stock_item", names)
+
+    # --- update_part (sengine #2) ---------------------------------------
+
+    async def test_update_part_changes_only_given_fields(self):
+        await self._writable()
+        self._as(self.user)
+        result = await self._call("update_part", {"part_id": self.part.pk, "description": "after", "IPN": "W-1"})
+        self.assertEqual(result["description"], "after")
+        self.assertEqual(result["IPN"], "W-1")
+        self.assertEqual(result["name"], "Scratch")
+        await sync_to_async(self.part.refresh_from_db)()
+        self.assertEqual(self.part.description, "after")
+
+    async def test_update_part_needs_a_field_and_the_role(self):
+        await self._writable()
+        self._as(self.user)
+        with self.assertRaises(ToolError):
+            await update_part(part_id=self.part.pk)
+        self._as(self.viewer)
+        with self.assertRaises(ToolError):
+            await update_part(part_id=self.part.pk, description="nope")
+
+    # --- create_stock_item (sengine #4) ---------------------------------
+
+    async def test_create_stock_item_sets_serials(self):
+        await self._writable()
+        self._as(self.user)
+        result = await self._call(
+            "create_stock_item",
+            {"part": self.tracked.pk, "quantity": 2, "location": self.location.pk, "serial_numbers": "1001,1002"},
+        )
+        self.assertEqual(sorted(i["serial"] for i in result["items"]), ["1001", "1002"])
+
+        def _tracking_users():
+            return set(
+                StockItemTracking.objects.filter(item__part=self.tracked).values_list("user__username", flat=True)
+            )
+
+        self.assertEqual(await sync_to_async(_tracking_users)(), {self.user.username})
+
+    async def test_create_stock_item_needs_the_add_role(self):
+        await self._writable()
+        self._as(self.viewer)
+        with self.assertRaises(ToolError):
+            await create_stock_item(part=self.part.pk, quantity=1)
+
+    # --- labels and machines (sengine #3, #10) --------------------------
+
+    async def test_list_label_templates(self):
+        self._as(self.user)
+        templates = await self._call("list_label_templates", {"model_type": "stockitem"})
+        self.assertGreater(templates["count"], 0)
+        self.assertTrue(all(t["model_type"] == "stockitem" for t in templates["results"]))
+
+    async def test_list_machines_follows_the_admin_ruleset(self):
+        """Machine configs sit in InvenTree's admin ruleset, so listing them needs admin view."""
+        self._as(self.user)
+        with self.assertRaises(ToolError):
+            await list_machines()
+
+        await sync_to_async(self.assignRole)("admin.view")
+        machines = await self._call("list_machines", {})
+        self.assertIn("results", machines)
+
+    async def test_print_label_reports_the_plugin_and_refuses_a_fallback(self):
+        def _template():
+            return LabelTemplate.objects.filter(model_type="stockitem", enabled=True).first()
+
+        template = await sync_to_async(_template)()
+        self.assertIsNotNone(template)
+        await self._writable()
+        self._as(self.user)
+
+        output = await self._call(
+            "print_label", {"template_id": template.pk, "items": [self.item.pk], "plugin": "inventreelabel"}
+        )
+        self.assertEqual(output["plugin"], "inventreelabel")
+
+        with self.assertRaises(ToolError) as cm:
+            await print_label(template_id=template.pk, items=[self.item.pk], plugin="no-such-plugin")
+        self.assertIn("not an active label printing plugin", str(cm.exception))
+
+    # --- barcodes (sengine #5) ------------------------------------------
+
+    async def test_link_scan_unlink_barcode(self):
+        await self._writable()
+        self._as(self.user)
+        linked = await self._call(
+            "link_barcode", {"barcode": "EXT-WT-1", "model": "stockitem", "object_id": self.item.pk}
+        )
+        self.assertIn("success", linked)
+
+        scanned = await self._call("scan_barcode", {"barcode": "EXT-WT-1"})
+        self.assertEqual(scanned["stockitem"]["pk"], self.item.pk)
+
+        await self._call("unlink_barcode", {"model": "stockitem", "object_id": self.item.pk})
+        missing = await self._call("scan_barcode", {"barcode": "EXT-WT-1"})
+        self.assertIs(missing["match"], False)
+
+    async def test_link_barcode_refuses_unknown_models_and_missing_roles(self):
+        await self._writable()
+        self._as(self.user)
+        with self.assertRaises(ToolError):
+            await link_barcode(barcode="X", model="user", object_id=1)
+        self._as(self.viewer)
+        with self.assertRaises(ToolError):
+            await link_barcode(barcode="EXT-WT-2", model="part", object_id=self.part.pk)

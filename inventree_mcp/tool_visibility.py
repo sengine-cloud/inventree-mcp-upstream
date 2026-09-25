@@ -38,12 +38,15 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from asgiref.sync import sync_to_async
 from mcp.types import ListToolsResult, PaginatedRequestParams
 
 from . import proxy
 from .context import has_bound_identity
 from .mcp_server import mcp
+from .settings import get_plugin_setting
 from .tools.discovery import RESOURCE_LOADERS
+from .view_resolution import resolve_view
 
 if TYPE_CHECKING:
     from mcp.server.context import ServerRequestContext
@@ -117,6 +120,31 @@ _TOOL_RESOURCES: dict[str, str] = {
 }
 
 
+# Tools not backed by a describe_filters resource, each with the view and
+# HTTP method it calls. A non-GET entry is hidden while MCP_READ_ONLY is on
+# (call_view() would refuse it anyway), and otherwise listed only if the user's
+# roles allow that method on that view. The call itself is still checked in
+# full by call_view(); this only avoids advertising what would fail.
+_TOOL_VIEWS: dict[str, tuple[str, str, str]] = {
+    "update_part": ("part.api", "PartDetail", "PATCH"),
+    "create_stock_item": ("stock.api", "StockList", "POST"),
+    "list_label_templates": ("report.api", "LabelTemplateList", "GET"),
+    "list_machines": ("machine.api", "MachineList", "GET"),
+    "print_label": ("report.api", "LabelPrint", "POST"),
+    "scan_barcode": ("plugin.base.barcodes.api", "BarcodeScan", "POST"),
+    "link_barcode": ("plugin.base.barcodes.api", "BarcodeAssign", "POST"),
+    "unlink_barcode": ("plugin.base.barcodes.api", "BarcodeUnassign", "POST"),
+}
+
+
+async def _tool_view_visible(name: str) -> bool:
+    module, cls_name, method = _TOOL_VIEWS[name]
+    if method != "GET" and await sync_to_async(get_plugin_setting)("MCP_READ_ONLY"):
+        return False
+    view_cls = resolve_view(module, cls_name)
+    return view_cls is not None and await proxy.user_has_access(view_cls, method)
+
+
 async def visible_tool_names(names: Iterable[str]) -> set[str]:
     """Return the subset of *names* the current bound user can actually call.
 
@@ -147,6 +175,11 @@ async def visible_tool_names(names: Iterable[str]) -> set[str]:
     resource_access: dict[str, bool] = {}
 
     for name in names:
+        if name in _TOOL_VIEWS:
+            if await _tool_view_visible(name):
+                visible.add(name)
+            continue
+
         resource = _TOOL_RESOURCES.get(name)
         if resource is None:
             visible.add(name)

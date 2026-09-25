@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 from ..mcp_server import mcp
 from ..proxy import call_view
 from ..view_resolution import resolve_view
@@ -92,4 +94,66 @@ async def get_part(part_id: int, filters: dict[str, Any] | None = None) -> dict:
         f"/api/part/{part_id}/",
         pk=part_id,
         query_params=filters,
+    )
+
+
+@mcp.tool()
+async def update_part(
+    part_id: int,
+    name: str | None = None,
+    description: str | None = None,
+    IPN: str | None = None,
+    revision: str | None = None,
+    keywords: str | None = None,
+    units: str | None = None,
+    link: str | None = None,
+    notes: str | None = None,
+    active: bool | None = None,
+    minimum_stock: float | None = None,
+    default_location: int | None = None,
+) -> dict:
+    """Update fields of an existing part. Only the fields you pass change.
+
+    A write: blocked while the plugin's Read Only setting is on, and needs
+    the part change permission.
+
+    Args:
+        part_id: the Part's database ID.
+        name: new part name.
+        description: new description.
+        IPN: new internal part number.
+        revision: new revision string.
+        keywords: new search keywords.
+        units: new units of measure.
+        link: new external link (URL).
+        notes: new notes (markdown).
+        active: whether the part is active.
+        minimum_stock: minimum stock level.
+        default_location: default StockLocation ID for this part's stock.
+
+    Returns:
+        The updated part, same shape as get_part.
+    """
+    fields = {
+        "name": name,
+        "description": description,
+        "IPN": IPN,
+        "revision": revision,
+        "keywords": keywords,
+        "units": units,
+        "link": link,
+        "notes": notes,
+        "active": active,
+        "minimum_stock": minimum_stock,
+        "default_location": default_location,
+    }
+    data = {k: v for k, v in fields.items() if v is not None}
+    if not data:
+        raise ToolError("Pass at least one field to change")
+    return await call_view(
+        resolve_view("part.api", "PartDetail"),
+        "PATCH",
+        f"/api/part/{part_id}/",
+        pk=part_id,
+        data=data,
     )
